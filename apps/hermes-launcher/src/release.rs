@@ -504,13 +504,23 @@ fn walkdir_inner(root: &Path, dir: &Path, result: &mut Vec<PathBuf>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // Use entry.file_type() (lstat — does NOT follow symlinks) to match
+            // the Python manifest writer, which skips symlinks entirely. Using
+            // path.is_file()/is_dir() would follow symlinks and flag legitimate
+            // venv entries like runtime/venv/bin/python as "extra files."
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if file_type.is_symlink() {
+                continue;
+            } else if file_type.is_dir() {
                 // Skip .staging dirs
                 if path.file_name().map(|n| n == ".staging").unwrap_or(false) {
                     continue;
                 }
                 walkdir_inner(root, &path, result);
-            } else if path.is_file() {
+            } else if file_type.is_file() {
                 result.push(path);
             }
         }
@@ -786,5 +796,26 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(wrong_key.verifying_key().to_bytes());
         let result = verify_bundle(tmp.path(), Some(&wrong_pubkey));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_bundle_with_symlinks() {
+        // A relocatable venv contains file symlinks (e.g. runtime/venv/bin/python
+        // → python3.11). The Python manifest writer skips symlinks; the Rust
+        // verifier must agree — symlinks must not be flagged as "extra files."
+        let tmp = tempfile::tempdir().unwrap();
+        make_bundle_fixture(tmp.path());
+        // Create a file symlink mirroring a real venv layout
+        let target = tmp.path().join("runtime/venv/bin/python3.11");
+        std::fs::write(&target, "# fake python3.11\n").unwrap();
+        let link = tmp.path().join("runtime/venv/bin/python");
+        // Remove the plain file created by make_bundle_fixture, replace with symlink
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        write_manifest(tmp.path());
+        let (pubkey, _) = sign_manifest(tmp.path());
+        // Should verify without error — symlink is skipped by both sides
+        verify_bundle(tmp.path(), Some(&pubkey)).unwrap();
     }
 }

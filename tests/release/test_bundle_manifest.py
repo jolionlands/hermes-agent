@@ -141,6 +141,32 @@ class TestVerifyFileHashes:
         assert ok, f"Expected clean verify, got errors: {errors}"
         assert errors == []
 
+    def test_bundle_with_file_symlink_verifies(self, bundle_fixture):
+        """A relocatable venv has file symlinks like runtime/venv/bin/python
+        → python3.11. Both the writer and verifier must skip symlinks so
+        the Rust updater doesn't flag them as unsigned extras."""
+        # Replace the plain python file with a symlink, mirroring a real venv
+        python_path = bundle_fixture / "runtime" / "venv" / "bin" / "python"
+        python_path.unlink()
+        python_target = bundle_fixture / "runtime" / "venv" / "bin" / "python3.11"
+        python_target.write_text("# fake python3.11\n")
+        python_path.symlink_to(python_target)
+
+        manifest = write_manifest(
+            bundle_fixture,
+            version="2026.07.14",
+            channel="nightly",
+            git_sha="a" * 40,
+            platform="linux-x64",
+        )
+        # The symlink must NOT appear in the manifest
+        assert "runtime/venv/bin/python" not in manifest["files"]
+        # The target file SHOULD appear
+        assert "runtime/venv/bin/python3.11" in manifest["files"]
+        # Verification must pass cleanly
+        ok, errors = verify_file_hashes(bundle_fixture, manifest)
+        assert ok, f"Symlink bundle should verify cleanly, got errors: {errors}"
+
     def test_tampered_file_detected(self, bundle_fixture):
         manifest = write_manifest(
             bundle_fixture,
