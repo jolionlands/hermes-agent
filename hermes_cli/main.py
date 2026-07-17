@@ -6042,10 +6042,26 @@ def _print_fts_optimize_available_notice() -> None:
     """Advertise the opt-in v23 search-index optimization after `hermes update`.
 
     Only fires when the current profile's state.db is still on the legacy
-    (pre-v23) inline FTS layout. Estimates the reclaimable space from the
-    live/free split so the user sees a concrete number, then points at the
-    exact command. Silent for fresh/already-optimized installs.
+    (pre-v23) inline FTS layout. Leads with the reclaimable-space figure and
+    points at the exact command. Honors ``sessions.fts_optimize_notice``:
+    ``advise`` (default) prints an advisory notice, ``require`` prints a
+    firmer required-upgrade notice, ``off`` suppresses it. Silent for
+    fresh/already-optimized installs.
     """
+    mode = "advise"
+    try:
+        from hermes_cli.config import load_config
+
+        mode = str(
+            ((load_config() or {}).get("sessions") or {}).get(
+                "fts_optimize_notice", "advise"
+            )
+        ).strip().lower()
+    except Exception:
+        mode = "advise"
+    if mode == "off":
+        return
+
     try:
         from hermes_constants import get_hermes_home
         from hermes_state import SessionDB
@@ -6078,16 +6094,28 @@ def _print_fts_optimize_available_notice() -> None:
             except Exception:
                 pass
     sql = (row[0] if row else "") or ""
-    if not sql or "content=" in sql.replace(" ", ""):
-        # No legacy inline index present (fresh/optimized) — nothing to offer.
+    if not sql or "tool_name" in sql:
+        # v23 layout already present (fresh/optimized) — nothing to offer.
         return
+
+    # Concrete size framing — lead with the savings the user cares about.
+    est_reclaim = size_gb * 0.6
     print()
-    print("◆ Optimize your session database")
-    print(
-        f"  Your search index uses the old layout. Rebuilding it in the "
-        f"compact format typically reclaims a large share of state.db "
-        f"(currently {size_gb:.1f} GB — heavy users see ~60% back)."
-    )
+    if mode == "require":
+        print("◆ Session database upgrade required")
+        print(
+            f"  Your search index uses the OLD storage layout and should be "
+            f"upgraded. The new layout typically frees ~60% of state.db "
+            f"(≈{est_reclaim:.1f} GB of your current {size_gb:.1f} GB) and is "
+            f"required for continued optimal operation."
+        )
+    else:
+        print("◆ Reclaim ~60% of your session database disk")
+        print(
+            f"  Your search index uses the old storage layout. Upgrading it "
+            f"typically frees ~60% of state.db — about {est_reclaim:.1f} GB "
+            f"of your current {size_gb:.1f} GB."
+        )
     print("  Run when convenient:  hermes sessions optimize-storage")
     print(
         "  It runs in the foreground with a progress bar, is safe to "

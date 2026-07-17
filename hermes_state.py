@@ -142,6 +142,16 @@ DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 
 SCHEMA_VERSION = 23
 
+# FTS storage-layout version, tracked INDEPENDENTLY of SCHEMA_VERSION in the
+# state_meta key ``fts_storage_version``. The main schema version advances
+# freely on open (so future migrations always land); the FTS *layout* only
+# reaches the current version when a DB is either born fresh or explicitly
+# optimized via ``hermes sessions optimize-storage``. A legacy DB sits at
+# layout 0 (marker absent) with a working inline index until the user opts in.
+#   1 = v23 external-content layout (content/tool_name/tool_calls,
+#       tool-row-excluded trigram)
+FTS_STORAGE_VERSION = 1
+
 # Cap on user-controlled FTS5 query input before regex/sanitizer processing.
 # Search queries do not need to be arbitrarily large, and bounding them keeps
 # sanitizer/runtime behavior predictable under adversarial input.
@@ -2103,15 +2113,27 @@ class SessionDB:
                 logger.warning("VACUUM after FTS optimize failed: %s", exc)
                 vacuum_ok = False
 
-        # Phase 4: advance schema_version now that the FTS layer is v23.
-        def _bump(conn):
+        # Phase 4: stamp the FTS storage layout as current, clear the "available"
+        # flag, and advance schema_version if it was somehow still behind (the
+        # main version normally advances on open now, but bump defensively so a
+        # DB opened only by pre-decoupling code still settles). The FTS-layout
+        # marker is the source of truth for "is this DB optimized".
+        def _settle(conn):
+            conn.execute(
+                "INSERT INTO state_meta (key, value) VALUES ('fts_storage_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(FTS_STORAGE_VERSION),),
+            )
+            conn.execute("DELETE FROM state_meta WHERE key = 'fts_optimize_available'")
             conn.execute(
                 "UPDATE schema_version SET version = ? WHERE version < ?",
                 (SCHEMA_VERSION, SCHEMA_VERSION),
             )
-        self._execute_write(_bump, _worker=True)
+        self._execute_write(_settle, _worker=True)
         _emit("done")
-        logger.info("FTS storage optimization complete (schema v%d).", SCHEMA_VERSION)
+        logger.info(
+            "FTS storage optimization complete (layout v%d).", FTS_STORAGE_VERSION
+        )
         return {"ok": True, "vacuumed": vacuum_ok}
 
     @staticmethod
@@ -2490,40 +2512,40 @@ class SessionDB:
                 # enough — is the wrong default. So on an EXISTING install we
                 # touch nothing here: the v22 inline FTS keeps working exactly
                 # as before, and we only record a flag advertising that the
-                # optimization is available. `hermes db optimize` performs the
-                # whole transition as one deliberate, disk-checked, progress-
-                # reported foreground operation and bumps the version itself.
+                # optimization is available. `hermes sessions optimize-storage`
+                # performs the whole transition as one deliberate, disk-checked,
+                # progress-reported foreground operation.
                 #
-                # Fresh installs never reach this branch (their schema_version
-                # row is inserted at SCHEMA_VERSION), and the post-migration
-                # FTS setup block below builds them the v23 external-content
-                # schema directly — born optimized, zero cost.
-                #
-                # NOTE: we deliberately do NOT bump schema_version to 23 for
-                # existing DBs (see the guard below). The DB stays at its
-                # current version — its other migrations are already applied —
-                # while the FTS layer remains v22 until the user opts in.
+                # DECOUPLED VERSIONING. Crucially, this does NOT hold back the
+                # main schema_version. The FTS storage LAYOUT is tracked by an
+                # independent `fts_storage_version` marker (see
+                # _fts_storage_version / SETTLE below), so schema_version
+                # advances to SCHEMA_VERSION here like every other migration —
+                # future v24+ migrations land automatically for legacy-FTS
+                # users too. Only the FTS *layout* waits for opt-in.
                 if fts5_available and self._db_has_legacy_inline_fts(cursor):
                     self.set_meta("fts_optimize_available", "1", cursor=cursor)
-                # Leave fts_migrations_complete True: nothing here can fail,
-                # and the version guard below already refuses to advance past
-                # an un-opted-in FTS layer.
 
-            # Advance schema_version to current ONLY when the FTS layer is
-            # already at v23 (fresh install, or a completed `hermes db
-            # optimize`). An existing legacy install that hasn't opted in
-            # stays at its current version so this detection re-runs on each
-            # open (cheap) until the user optimizes — at which point
-            # optimize_fts_storage() bumps the version to SCHEMA_VERSION.
-            #
-            # When FTS5 is unavailable we can't inspect/created the FTS layer
-            # at all, so we can't assert it's v23 — leave the version untouched
-            # rather than falsely claiming the DB reached the current schema.
-            _fts_at_v23 = fts5_available and not self._db_has_legacy_inline_fts(cursor)
+            # The FTS storage layout is versioned independently of the main
+            # schema (see the v23 note above). Stamp the current layout so the
+            # main version can always advance: a fresh/optimized DB is at
+            # FTS_STORAGE_VERSION; a legacy DB is left at whatever it had
+            # (absent/0) until `optimize-storage` runs.
+            if fts5_available and not self._db_has_legacy_inline_fts(cursor):
+                self.set_meta(
+                    "fts_storage_version", str(FTS_STORAGE_VERSION), cursor=cursor
+                )
+
+            # Advance schema_version to current for ALL non-FTS-layout
+            # migrations. This is deliberately NOT gated on the FTS opt-in —
+            # holding the whole version back would block every future schema
+            # migration for a user who never optimizes. FTS5 being unavailable
+            # is the one case we skip (we can't have created the current FTS
+            # objects, so claiming the current schema would be a lie).
             if (
                 current_version < SCHEMA_VERSION
                 and fts_migrations_complete
-                and _fts_at_v23
+                and fts5_available
             ):
                 cursor.execute(
                     "UPDATE schema_version SET version = ?",

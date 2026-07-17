@@ -5230,28 +5230,33 @@ class TestFTSExternalContentMigration:
         conn.close()
 
     def test_v22_open_leaves_legacy_untouched_and_advertises(self, tmp_path):
-        """Opening a legacy v22 DB must NOT auto-migrate: the inline indexes
-        keep working, schema_version stays put, and the opt-in flag is set."""
+        """Opening a legacy v22 DB must NOT auto-migrate the FTS layout, but
+        the main schema_version DOES advance (decoupled) so future non-FTS
+        migrations aren't blocked. The inline index keeps working and the
+        opt-in flag is set."""
         db_path = tmp_path / "v22.db"
         self._build_v22_db(db_path)
 
         db = SessionDB(db_path=db_path)
         try:
-            # Version is NOT advanced to v23 — the FTS layer is still legacy.
+            # DECOUPLED: the main schema_version advances to current even though
+            # the FTS layout stays legacy — future migrations must not be gated
+            # behind the FTS opt-in.
             version = db._conn.execute(
                 "SELECT version FROM schema_version"
             ).fetchone()[0]
-            assert version == 22, "must not auto-bump past an un-opted-in FTS layer"
+            assert version == SCHEMA_VERSION, "main schema version must advance"
+            # But the FTS storage layout is NOT stamped current — it's legacy.
+            assert db.get_meta("fts_storage_version") is None
+            assert db.fts_optimize_available() is True
+            assert db.get_meta("fts_optimize_available") == "1"
 
             # Legacy inline shape is intact (content shadow table still there).
             assert db._conn.execute(
                 "SELECT name FROM sqlite_master WHERE name = 'messages_fts_content'"
             ).fetchone() is not None
-            assert db.fts_optimize_available() is True
-            assert db.get_meta("fts_optimize_available") == "1"
 
-            # Search still works on the legacy index (no deferred rebuild, no
-            # gap supplement needed — the index is fully populated).
+            # Search still works on the legacy index (no deferred rebuild).
             assert db.fts_rebuild_status() is None
             assert len(db.search_messages("deployment")) == 1
             assert len(db.search_messages("send_message")) == 1  # #16751 held
@@ -5275,7 +5280,10 @@ class TestFTSExternalContentMigration:
             result = db.optimize_fts_storage(vacuum=False)
             assert result["ok"] is True
 
-            # Version advanced; flag cleared; no longer "available".
+            # Layout stamped current; flag cleared; no longer "available".
+            assert db.get_meta("fts_storage_version") == str(
+                hermes_state.FTS_STORAGE_VERSION
+            )
             assert db._conn.execute(
                 "SELECT version FROM schema_version"
             ).fetchone()[0] == SCHEMA_VERSION
