@@ -400,6 +400,200 @@ class AIAgent:
     for AI models that support function calling.
     """
 
+    # -----------------------------------------------------------------------
+    # Instance attributes — set by init_agent() in agent/agent_init.py.
+    # Ideally, we could refactor this class into smaller parts so that
+    # we don't need to split its __init__ into a separate file.
+    # Declared here so type checkers know they exist (init_agent receives
+    # the instance as a plain `agent` parameter, not as a method receiver,
+    # so cross-module attribute assignment is invisible to static analysis).
+    # -----------------------------------------------------------------------
+    # scalars
+    _anthropic_api_key: str
+    _anthropic_base_url: str | None
+    _budget_exhausted_injected: bool
+    _budget_grace_call: bool
+    _cache_ttl: str
+    _cached_system_prompt: str | None
+    _chat_id: str | None
+    _chat_name: str | None
+    _chat_type: str | None
+    _client_kwargs: dict
+    _codex_reasoning_replay_enabled: bool
+    _compression_feasibility_checked: bool
+    _credits_latch: dict
+    _current_streamed_assistant_text: str
+    _delegate_depth: int
+    _end_session_on_close: bool
+    _executing_tools: bool
+    _fallback_activated: bool
+    _fallback_chain: list
+    _fallback_index: int
+    _force_ascii_payload: bool
+    _interrupt_requested: bool
+    _interrupt_thread_signal_pending: bool
+    _is_anthropic_oauth: bool
+    _is_user_initiated_turn: bool
+    _iters_since_skill: int
+    _last_flushed_db_idx: int
+    _memory_enabled: bool
+    _memory_nudge_interval: int
+    _memory_write_context: str
+    _memory_write_origin: str
+    _parent_session_id: str | None
+    _persist_disabled: bool
+    _primary_runtime: dict
+    _session_db_created: bool
+    _session_init_model_config: dict
+    _session_json_enabled: bool
+    _skill_nudge_interval: int
+    _skip_mcp_refresh: bool
+    _stream_needs_break: bool
+    _stream_writer_dropped: int
+    _stream_writer_token: int
+    _thread_id: str | None
+    _tool_snapshot_generation: int
+    _turns_since_memory: int
+    _user_name: str | None
+    _user_profile_enabled: bool
+    _user_turn_count: int
+    acp_command: str | None
+    api_key: str | None
+    api_mode: str | None
+    ephemeral_system_prompt: str | None
+    lmstudio_load_mode: str
+    load_soul_identity: bool
+    log_prefix: str
+    log_prefix_chars: int
+    max_iterations: int
+    max_tokens: int | None
+    memory_notifications: str
+    model: str
+    pass_session_id: bool
+    platform: str | None
+    provider: str | None
+    provider_data_collection: str | None
+    provider_require_parameters: bool
+    provider_sort: str | None
+    quiet_mode: bool
+    save_trajectories: bool
+    service_tier: str | None
+    session_api_calls: int
+    session_cache_read_tokens: int
+    session_cache_write_tokens: int
+    session_completion_tokens: int
+    session_cost_source: str
+    session_cost_status: str
+    session_estimated_cost_usd: float
+    session_id: str | None
+    session_input_tokens: int
+    session_output_tokens: int
+    session_prompt_tokens: int
+    session_reasoning_tokens: int
+    session_total_tokens: int
+    show_commentary: bool
+    skip_context_files: bool
+    suppress_status_output: bool
+    tool_delay: float
+    tool_progress_mode: str
+    verbose_logging: bool
+
+    # callbacks
+    clarify_callback: Callable | None
+    event_callback: Optional[Callable[[str, dict], None]]
+    interim_assistant_callback: Callable | None
+    notice_callback: Callable | None
+    notice_clear_callback: Callable | None
+    reaction_callback: Optional[Callable[[str], None]]
+    read_terminal_callback: Callable | None
+    reasoning_callback: Callable | None
+    status_callback: Callable | None
+    step_callback: Callable | None
+    stream_delta_callback: Callable | None
+    thinking_callback: Callable | None
+    tool_complete_callback: Callable | None
+    tool_gen_callback: Callable | None
+    tool_progress_callback: Callable | None
+    tool_start_callback: Callable | None
+
+    # collections
+    acp_args: list[str] | None
+    disabled_toolsets: List[str] | None
+    enabled_toolsets: List[str] | None
+    prefill_messages: List[Dict[str, Any]] | None
+    providers_allowed: List[str] | None
+    providers_ignored: List[str] | None
+    providers_order: List[str] | None
+    reasoning_config: Dict[str, Any] | None
+    request_overrides: Dict[str, Any] | None
+
+    # internal / runtime state
+    _active_children: list
+    _active_children_lock: Any
+    _anthropic_client: Any | None
+    _anthropic_image_fallback_cache: Any
+    _api_max_retries: Any
+    _aux_compression_context_length_config: Any | None
+    _base_url_hostname: Any
+    _bedrock_guardrail_config: Any | None
+    _bedrock_region: Any
+    _checkpoint_mgr: Any
+    _client_lock: Any
+    _compression_threshold_autoraised: Any | None
+    _compression_warning: Any | None
+    _config_context_length: Any
+    _credential_pool: Any
+    _credits_session_start_micros: Any | None
+    _credits_state: Any | None
+    _custom_providers: Any
+    _environment_probe: Any
+    _execution_thread_id: Any
+    _fallback_model: Any
+    _gateway_session_key: Any
+    _intent_ack_continuation: Any
+    _interrupt_message: Any
+    _kanban_worker_guidance: Any
+    _memory_manager: Any | None
+    _memory_store: Any | None
+    _ollama_num_ctx: Any
+    _parallel_tool_call_guidance: Any
+    _pending_cli_user_message: Any | None
+    _pending_steer_lock: Any
+    _persist_user_message_idx: Any | None
+    _persist_user_message_override: Any | None
+    _persist_user_message_timestamp: Any | None
+    _platform_hint_overrides: Any
+    _print_fn: Any | None
+    _session_db: Any
+    _session_persist_lock: Any
+    _stream_callback: Any | None
+    _stream_context_scrubber: Any
+    _stream_think_scrubber: Any
+    _stream_writer_lock: Any
+    _stream_writer_tls: Any
+    _subdirectory_hints: Any
+    _task_completion_guidance: Any
+    _todo_store: Any
+    _tool_guardrails: Any
+    _tool_use_enforcement: Any
+    _tool_worker_threads_lock: Any
+    _user_id: Any
+    _user_id_alt: Any
+    background_review_callback: Any
+    client: Any | None
+    codex_app_server_auto_compaction: Any
+    compression_enabled: Any
+    compression_in_place: Any
+    context_compressor: Any
+    iteration_budget: Optional[IterationBudget]
+    logs_dir: Any
+    openrouter_min_coding_score: Optional[float]
+    session_start: Any
+    tools: Any
+    valid_tool_names: Any
+    _current_tool: Any
+    _api_call_count: int
+
     _TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER = (
         "[hermes-agent: tool call arguments were corrupted in this session and "
         "have been dropped to keep the conversation alive. See issue #15236.]"

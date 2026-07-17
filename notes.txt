@@ -174,3 +174,90 @@ the pattern is always identical: `param: Type = None` → `param: Type | None = 
 two runtime-breaking gotchas found during the sweep:
 1. lowercase `callable` (builtin function) → must be `Callable` (typing)
 2. string forward-refs can't use `| None` → must use `Optional["Ref"]`
+
+---
+
+## run_agent.py — unresolved-attribute analysis (190 errors)
+
+### category 1: "Self@<method>" — init_agent() cross-module init (186/190)
+
+these are ALL the same root cause: `AIAgent.__init__` in `run_agent.py` is a
+thin forwarder that calls `init_agent(self, ...)` from `agent/agent_init.py`.
+that function sets `self.model`, `self.provider`, `self.session_id`, etc. on
+the instance — but ty can't see across the module boundary that these
+attributes are being set. so every method that accesses `self.model`,
+`self.provider`, etc. gets flagged.
+
+**these are NOT bugs.** the attributes are correctly set at runtime by
+`init_agent()`. this is a ty limitation — it can't track attribute assignments
+made in a function defined in a different module that receives `self` as a
+regular parameter (not as a method on the class).
+
+example:
+```python
+# run_agent.py
+class AIAgent:
+    def __init__(self, model: str = "", ...):
+        from agent.agent_init import init_agent
+        init_agent(self, model=model, ...)  # sets self.model, self.provider, etc.
+
+    def _resolved_api_call_timeout(self):
+        return self.provider  # ty: "Self@_resolved_api_call_timeout has no attribute provider"
+```
+
+**fix approach:** this is the single biggest cluster of ty errors in the
+codebase (186 in run_agent.py alone, plus similar in other files). the cleanest
+fix would be to declare the attributes as class-level annotations in the
+`AIAgent` class body so ty knows they exist:
+
+```python
+class AIAgent:
+    # Instance attributes — set by init_agent() in agent/agent_init.py
+    model: str
+    provider: str | None
+    session_id: str | None
+    # ... etc
+```
+
+this is a one-time declaration that would clear ~186 errors instantly. it's
+also good documentation — currently there's no single place that lists all
+instance attributes; they're scattered across the 60-param init_agent() body.
+
+### category 2: object.function — duck-typed tool_calls access (2 errors)
+
+line 1968: `tc.function.name` and `tc.function.arguments` on objects typed as
+`object`. this is because `msg.tool_calls` is checked via `hasattr` +
+`isinstance(list)` but the list elements are `object` to ty.
+
+```python
+if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
+    tool_calls_data = [
+        {"name": tc.function.name, "arguments": tc.function.arguments}
+        for tc in msg.tool_calls
+    ]
+```
+
+**not a bug** — this is duck-typed access to OpenAI SDK objects. the `hasattr`
+guard makes it safe at runtime. ty just can't infer the element type of a
+list accessed via `hasattr`. could be fixed with a `type: ignore` or by
+narrowing `msg` to a proper type.
+
+### category 3: ~AlwaysFalsy.on_session_end — duck-typed context_compressor (2 errors)
+
+lines 3416, 3441: `self.context_compressor.on_session_end(...)` after a
+`hasattr(self, "context_compressor") and self.context_compressor` guard.
+
+```python
+if hasattr(self, "context_compressor") and self.context_compressor:
+    self.context_compressor.on_session_end(self.session_id or "", messages or [])
+```
+
+ty narrows `self.context_compressor` to `~AlwaysFalsy` (the truthy branch of
+the `and`) but doesn't know it has `on_session_end`. **not a bug** — the
+`hasattr` guard makes this safe. again a type-system limitation with
+duck-typed access.
+
+### verdict for run_agent.py: 0 real bugs, 190 type-system limitations
+
+all 190 are ty being unable to track either cross-module attribute init
+(186) or duck-typed hasattr-guarded access (4). no logic bugs found.
