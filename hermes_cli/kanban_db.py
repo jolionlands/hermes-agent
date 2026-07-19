@@ -6029,6 +6029,7 @@ class DispatchResult:
     spawned: list[tuple[str, str, str]] = field(default_factory=list)
     """List of ``(task_id, assignee, workspace_path)`` triples."""
     skipped_unassigned: list[str] = field(default_factory=list)
+    skipped_title_denylist: list[tuple[str, str]] = field(default_factory=list)
     """Ready task ids skipped because they have no assignee at all.
     Operator-actionable — usually a misfiled task waiting for routing."""
     auto_assigned_default: list[str] = field(default_factory=list)
@@ -7448,6 +7449,7 @@ def dispatch_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    title_denylist: Optional[Iterable[str]] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -7482,6 +7484,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            title_denylist=title_denylist,
         )
     with _dispatch_tick_lock(db_path) as held:
         if not held:
@@ -7498,6 +7501,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            title_denylist=title_denylist,
         )
 
 
@@ -7514,6 +7518,7 @@ def _dispatch_once_locked(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    title_denylist: Optional[Iterable[str]] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -7588,7 +7593,7 @@ def _dispatch_once_locked(
         )
 
     ready_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, title FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -7631,6 +7636,43 @@ def _dispatch_once_locked(
     # rest of the loop can use ``if default_assignee:`` as a single check.
     # We also resolve profile_exists once here for the same reason.
     _default_assignee = (default_assignee or "").strip() or None
+    _title_prefixes = tuple(dict.fromkeys(
+        str(prefix).strip().lower()
+        for prefix in (title_denylist or ())
+        if str(prefix).strip()
+    ))
+
+    def _skip_manual_title(row, column: str) -> bool:
+        title = (row["title"] or "").strip().lower()
+        matched = next(
+            (prefix for prefix in _title_prefixes if title.startswith(prefix)),
+            None,
+        )
+        if matched is None:
+            return False
+        result.skipped_title_denylist.append((row["id"], matched))
+        if not dry_run:
+            try:
+                with write_txn(conn):
+                    _append_event(
+                        conn,
+                        row["id"],
+                        "dispatch_skipped",
+                        {
+                            "reason": "title_denylist",
+                            "matched_prefix": matched,
+                            "board": board,
+                            "column": column,
+                        },
+                    )
+            except Exception:
+                _log.debug(
+                    "kanban dispatch: failed to record title denylist event for %s",
+                    row["id"],
+                    exc_info=True,
+                )
+        return True
+
     _default_assignee_resolved = False
     if _default_assignee:
         try:
@@ -7646,6 +7688,8 @@ def _dispatch_once_locked(
     for row in ready_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
+        if _skip_manual_title(row, "ready"):
+            continue
         row_assignee = row["assignee"]
         if not row_assignee:
             # Honour kanban.default_assignee: when the dispatcher hits an
@@ -7832,13 +7876,15 @@ def _dispatch_once_locked(
     # against max_spawn alongside ready tasks, so the total number of
     # running workers stays bounded.
     review_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, title FROM tasks "
         "WHERE status = 'review' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
     for row in review_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
+        if _skip_manual_title(row, "review"):
+            continue
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
             continue

@@ -2249,11 +2249,19 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         max_spawn = cli_max if cli_max is not None else _coerce_positive_int(
             _kanban_cfg.get("max_spawn")
         )
+        from gateway.kanban_watchers import _resolve_dispatch_title_denylist
+        title_denylist = _resolve_dispatch_title_denylist(
+            _kanban_cfg.get("dispatch_title_denylist"),
+            _kanban_cfg.get("dispatch_title_denylist_per_board"),
+            kb.get_current_board(),
+            lambda value: value.lower(),
+        )
     except Exception:
         default_assignee = None
         max_in_progress_per_profile = None
         max_in_progress = None
         max_spawn = getattr(args, "max", None)
+        title_denylist = []
     with kb.connect_closing() as conn:
         res = kb.dispatch_once(
             conn,
@@ -2263,6 +2271,7 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             failure_limit=getattr(args, "failure_limit", kb.DEFAULT_SPAWN_FAILURE_LIMIT),
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            title_denylist=title_denylist,
         )
     if getattr(args, "json", False):
         print(json.dumps({
@@ -2277,6 +2286,10 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
                 for (tid, who, ws) in res.spawned
             ],
             "skipped_unassigned": res.skipped_unassigned,
+            "skipped_title_denylist": [
+                {"task_id": task_id, "prefix": prefix}
+                for task_id, prefix in res.skipped_title_denylist
+            ],
             "skipped_nonspawnable": res.skipped_nonspawnable,
             "skipped_per_profile_capped": [
                 {"task_id": tid, "assignee": who, "current": current}
@@ -2310,6 +2323,8 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
         )
     if res.skipped_unassigned:
         print(f"Skipped (unassigned): {', '.join(res.skipped_unassigned)}")
+    for task_id, prefix in res.skipped_title_denylist:
+        print(f"Skipped (manual title prefix {prefix!r}): {task_id}")
     if res.skipped_per_profile_capped:
         for tid, who, current in res.skipped_per_profile_capped:
             print(

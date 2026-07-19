@@ -2879,6 +2879,10 @@ DEFAULT_CONFIG = {
         # worker process (if still running host-locally) is terminated
         # before the reclaim.  0 disables stale detection entirely.
         "dispatch_stale_timeout_seconds": 14400,
+        # Ready/review cards with these title prefixes remain manual.
+        "dispatch_title_denylist": [],
+        # A board entry replaces the global list for that board.
+        "dispatch_title_denylist_per_board": {},
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.

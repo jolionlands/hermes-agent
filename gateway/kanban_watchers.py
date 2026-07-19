@@ -25,6 +25,45 @@ from agent.i18n import t
 logger = logging.getLogger("gateway.run")
 
 
+def _resolve_dispatch_title_denylist(
+    global_raw: Any,
+    per_board_raw: Any,
+    board: Optional[str],
+    normalize: Callable[[str], str],
+) -> list[str]:
+    """Return the configured title prefixes for one board."""
+    raw = (
+        per_board_raw.get(board, global_raw)
+        if board and isinstance(per_board_raw, dict)
+        else global_raw
+    )
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        pieces = raw.split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        pieces = raw
+    else:
+        logger.warning(
+            "kanban dispatcher: invalid dispatch_title_denylist type %r; ignoring",
+            type(raw).__name__,
+        )
+        return []
+    prefixes = []
+    for piece in pieces:
+        try:
+            prefix = normalize(str(piece)).strip()
+        except (TypeError, ValueError):
+            logger.warning(
+                "kanban dispatcher: ignoring invalid dispatch title prefix %r",
+                piece,
+            )
+            continue
+        if prefix and prefix not in prefixes:
+            prefixes.append(prefix)
+    return prefixes
+
+
 def _resolve_auto_decompose_settings(
     load_config: Callable[[], Any],
 ) -> "tuple[bool, int]":
@@ -1059,6 +1098,12 @@ class GatewayKanbanWatchersMixin:
                     stale_timeout_seconds=stale_timeout_seconds,
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
+                    title_denylist=_resolve_dispatch_title_denylist(
+                        kanban_cfg.get("dispatch_title_denylist"),
+                        kanban_cfg.get("dispatch_title_denylist_per_board"),
+                        slug,
+                        lambda value: value.lower(),
+                    ),
                 )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
