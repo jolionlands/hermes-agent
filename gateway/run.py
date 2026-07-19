@@ -3181,6 +3181,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Set on gateway stop so the recreate-on-shutdown path can't resurrect
         # the pool during a real shutdown.
         self._executor_closing = False
+        self._worker_fence_lock = threading.Lock()
+        self._worker_fences_by_key: Dict[str, concurrent.futures.Future] = {}
+        self._worker_fences_by_session: Dict[str, concurrent.futures.Future] = {}
         # Track running agents per session for interrupt support
         # Key: session_key, Value: AIAgent instance
         self._running_agents: Dict[str, Any] = {}
@@ -10205,6 +10208,31 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # clearly moved on.
             _slash_confirm_mod.clear_if_stale(_quick_key)
 
+        # An asyncio owner task may be gone while its executor thread is still
+        # running. Never admit a replacement turn until that real worker exits.
+        if (
+            _quick_key not in self._running_agents
+            and self._has_live_worker_fence(session_key=_quick_key)
+        ):
+            _fenced_cmd = event.get_command()
+            if _fenced_cmd == "status":
+                return EphemeralReply(
+                    "The previous worker is still stopping. This conversation "
+                    "remains quarantined until it exits."
+                )
+            if _fenced_cmd in {"approve", "deny"}:
+                if _fenced_cmd == "approve":
+                    return await self._handle_approve_command(event)
+                return await self._handle_deny_command(event)
+            if _fenced_cmd == "stop":
+                return EphemeralReply(
+                    "Stop already requested. The current worker is still exiting safely."
+                )
+            return (
+                "The previous worker is still stopping. No new turn was started; "
+                "retry after it exits or restart the gateway if it is stuck."
+            )
+
         # PRIORITY handling when an agent is already running for this session.
         # Default behavior is to interrupt immediately so user text/stop messages
         # are handled with minimal latency.
@@ -10310,8 +10338,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     interrupt_reason=_INTERRUPT_REASON_STOP,
                     invalidation_reason="stop_command",
                 )
-                logger.info("STOP for session %s — agent interrupted, session lock released", _quick_key)
-                return EphemeralReply(t("gateway.stop.stopped"))
+                logger.info("STOP requested for session %s", _quick_key)
+                return EphemeralReply(
+                    "Stop requested. Waiting for the current worker to exit safely."
+                )
 
             # /reset and /new must bypass the running-agent guard so they
             # actually dispatch as commands instead of being queued as user
@@ -10328,6 +10358,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     interrupt_reason=_INTERRUPT_REASON_RESET,
                     invalidation_reason="new_command",
                 )
+                if self._has_live_worker_fence(session_key=_quick_key):
+                    return EphemeralReply(
+                        "The previous worker is still stopping, so /new was not "
+                        "applied. Retry after it exits."
+                    )
                 # Clean up the running agent entry so the reset handler
                 # doesn't think an agent is still active.
                 return await self._handle_reset_command(event)
@@ -11924,6 +11959,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         session_entry = await self.async_session_store.get_or_create_session(source)
         session_key = session_entry.session_key
+        if self._has_live_worker_fence(
+            session_key=session_key,
+            session_id=session_entry.session_id,
+        ):
+            return (
+                "This conversation still has a worker exiting from another route. "
+                "No overlapping turn was started."
+            )
         pinned_session_id = str(
             (getattr(event, "metadata", None) or {}).get("gateway_session_id") or ""
         ).strip()
@@ -16327,6 +16370,43 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             func,
             *args,
         )
+
+    def _register_worker_fence(
+        self,
+        future: concurrent.futures.Future,
+        *,
+        session_key: str,
+        session_id: str,
+    ) -> None:
+        """Quarantine a session until its executor worker actually exits."""
+        with self._worker_fence_lock:
+            if session_key:
+                self._worker_fences_by_key[session_key] = future
+            if session_id:
+                self._worker_fences_by_session[session_id] = future
+
+        def _clear(done: concurrent.futures.Future) -> None:
+            with self._worker_fence_lock:
+                if self._worker_fences_by_key.get(session_key) is done:
+                    self._worker_fences_by_key.pop(session_key, None)
+                if self._worker_fences_by_session.get(session_id) is done:
+                    self._worker_fences_by_session.pop(session_id, None)
+
+        future.add_done_callback(_clear)
+
+    def _has_live_worker_fence(
+        self, *, session_key: str = "", session_id: str = ""
+    ) -> bool:
+        lock = getattr(self, "_worker_fence_lock", None)
+        if lock is None:
+            return False
+        with lock:
+            by_key = getattr(self, "_worker_fences_by_key", {})
+            by_session = getattr(self, "_worker_fences_by_session", {})
+            return bool(
+                (session_key and session_key in by_key)
+                or (session_id and session_id in by_session)
+            )
 
     def _get_executor(self) -> concurrent.futures.ThreadPoolExecutor:
         """Return the gateway-owned executor for blocking agent work."""
@@ -21388,9 +21468,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _agent_warning_raw = _float_env("HERMES_AGENT_TIMEOUT_WARNING", 900)
             _agent_warning = _agent_warning_raw if _agent_warning_raw > 0 else None
             _warning_fired = False
-            _executor_task = asyncio.ensure_future(
-                self._run_in_executor_with_context(run_sync)
+            if self._has_live_worker_fence(
+                session_key=session_key or "",
+                session_id=session_id or "",
+            ):
+                return {
+                    "final_response": (
+                        "This conversation still has a worker exiting. "
+                        "No overlapping turn was started."
+                    ),
+                    "messages": history,
+                    "api_calls": 0,
+                    "tools": [],
+                    "history_offset": 0,
+                    "failed": True,
+                }
+            _worker_future = self._get_executor().submit(
+                copy_context().run, run_sync
             )
+            self._register_worker_fence(
+                _worker_future,
+                session_key=session_key or "",
+                session_id=session_id or "",
+            )
+            _executor_task = asyncio.wrap_future(_worker_future)
 
             _inactivity_timeout = False
             _POLL_INTERVAL = 5.0

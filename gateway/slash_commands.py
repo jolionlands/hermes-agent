@@ -109,6 +109,15 @@ class GatewaySlashCommandsMixin:
         
         # Get existing session key
         session_key = self._session_key_for_source(source)
+        old_entry = getattr(self.session_store, "_entries", {}).get(session_key)
+        if self._has_live_worker_fence(
+            session_key=session_key,
+            session_id=str(getattr(old_entry, "session_id", "") or ""),
+        ):
+            return EphemeralReply(
+                "The previous worker is still stopping, so /new was not "
+                "applied. Retry after it exits."
+            )
         self._invalidate_session_run_generation(session_key, reason="session_reset")
         # Evict the running-agent slot now that the generation is bumped. The
         # in-flight run's own guarded release (run_generation=old) will return
@@ -119,8 +128,6 @@ class GatewaySlashCommandsMixin:
 
         # Snapshot the old entry so on_session_finalize can report the
         # expiring session id before reset_session() rotates it.
-        old_entry = self.session_store._entries.get(session_key)
-
         # Close tool resources on the old agent (terminal sandboxes, browser
         # daemons, background processes) before evicting from cache.
         # Guard with getattr because test fixtures may skip __init__.
