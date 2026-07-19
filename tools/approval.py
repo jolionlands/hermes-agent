@@ -2506,11 +2506,13 @@ def _get_approval_timeout() -> int:
 
 
 def _get_cron_approval_mode() -> str:
-    """Read the cron approval mode from config. Returns 'deny' or 'approve'."""
+    """Read the cron approval mode from config."""
     try:
         from hermes_cli.config import load_config
         config = load_config()
         mode = str(cfg_get(config, "approvals", "cron_mode", default="deny")).lower().strip()
+        if mode == "smart":
+            return "smart"
         if mode in {"approve", "off", "allow", "yes"}:
             return "approve"
         return "deny"
@@ -3237,13 +3239,15 @@ def check_all_command_guards(command: str, env_type: str,
     is_cli = _is_interactive_cli()
     is_gateway = _is_gateway_approval_context()
     is_ask = env_var_enabled("HERMES_EXEC_ASK")
+    cron_mode = _get_cron_approval_mode() if _is_unattended_job() else None
+    unattended_smart = cron_mode == "smart"
 
     # Preserve the existing non-interactive behavior: outside CLI/gateway/ask
     # flows, we do not block on approvals and we skip external guard work.
-    if not is_cli and not is_gateway and not is_ask:
+    if not is_cli and not is_gateway and not is_ask and not unattended_smart:
         # Cron sessions: respect cron_mode config
         if _is_unattended_job():
-            if _get_cron_approval_mode() == "deny":
+            if cron_mode == "deny":
                 # Run detection to get a description for the block message
                 is_dangerous, _pk, description = detect_dangerous_command(command)
                 if is_dangerous:
@@ -3385,6 +3389,14 @@ def check_all_command_guards(command: str, env_type: str,
     # Inspired by OpenAI Codex's Smart Approvals guardian subagent
     # (openai/codex#13860).
     smart_denied_for_owner = False
+    if unattended_smart and approval_mode != "smart":
+        return {
+            "approved": False,
+            "message": (
+                "BLOCKED: approvals.cron_mode is smart but approvals.mode is not "
+                "smart. Configure both before unattended risky commands can run."
+            ),
+        }
     if approval_mode == "smart":
         combined_desc_for_llm = "; ".join(desc for _, desc, _ in warnings)
         observer_payload = _prepare_smart_approval_observer(
@@ -3414,6 +3426,15 @@ def check_all_command_guards(command: str, env_type: str,
             }
         elif verdict == "deny":
             smart_denied_for_owner = True
+        if unattended_smart:
+            return {
+                "approved": False,
+                "message": (
+                    f"BLOCKED by smart cron approval ({verdict}): "
+                    f"{combined_desc_for_llm}. Do NOT retry."
+                ),
+                "smart_denied": verdict == "deny",
+            }
         # An interactive owner may override DENY for this operation only.
         # ESCALATE follows the normal, potentially persistent manual behavior.
 
