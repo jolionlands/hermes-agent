@@ -791,6 +791,33 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban dispatcher: kanban_db not importable; dispatcher disabled")
             return
 
+        raw_dispatch_boards = os.environ.get("HERMES_KANBAN_DISPATCH_BOARDS")
+        if raw_dispatch_boards is None:
+            raw_dispatch_boards = kanban_cfg.get("dispatch_boards")
+        dispatch_boards = None
+        if raw_dispatch_boards is not None:
+            if isinstance(raw_dispatch_boards, (list, tuple, set)):
+                pieces = [str(item).strip() for item in raw_dispatch_boards]
+            else:
+                raw_text = str(raw_dispatch_boards).strip()
+                if raw_text.lower() in {"0", "false", "no", "off", "none", "disabled"}:
+                    logger.info("kanban dispatcher: no dispatch boards configured")
+                    return
+                pieces = raw_text.split(",")
+            dispatch_boards = set()
+            for piece in pieces:
+                if not str(piece).strip():
+                    continue
+                try:
+                    dispatch_boards.add(
+                        _kb._normalize_board_slug(piece) or _kb.DEFAULT_BOARD
+                    )
+                except ValueError:
+                    logger.warning(
+                        "kanban dispatcher: ignoring invalid dispatch board %r",
+                        piece,
+                    )
+
         # Single-dispatcher backstop. dispatch_in_gateway defaults to true, so a
         # new profile gateway (or a same-profile restart race) can silently
         # start a second dispatcher; concurrent dispatchers double reclaim
@@ -948,6 +975,16 @@ class GatewayKanbanWatchersMixin:
             str, tuple[tuple[str, int | None, int | None], float]
         ] = {}
 
+        def _dispatchable_board_slugs() -> list[str]:
+            try:
+                boards = _kb.list_boards(include_archived=False)
+            except Exception:
+                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
+            slugs = [board.get("slug") or _kb.DEFAULT_BOARD for board in boards]
+            if dispatch_boards is not None:
+                slugs = [slug for slug in slugs if slug in dispatch_boards]
+            return slugs
+
         def _board_db_fingerprint(slug: str) -> tuple[str, int | None, int | None]:
             path = _kb.kanban_db_path(slug)
             try:
@@ -1067,13 +1104,8 @@ class GatewayKanbanWatchersMixin:
             when users create a new board mid-run: no restart required,
             the next tick picks it up automatically.
             """
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             out: list[tuple[str, "Optional[object]"]] = []
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
+            for slug in _dispatchable_board_slugs():
                 out.append((slug, _tick_once_for_board(slug)))
             return out
 
@@ -1089,12 +1121,7 @@ class GatewayKanbanWatchersMixin:
             here keeps the stuck-warn fire only on real failures (broken
             PATH, missing venv, credential loss for a real Hermes profile).
             """
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
+            for slug in _dispatchable_board_slugs():
                 conn = None
                 try:
                     conn = _kb.connect(board=slug)
@@ -1143,14 +1170,9 @@ class GatewayKanbanWatchersMixin:
                     "kanban auto-decompose: import failed (%s); skipping", exc,
                 )
                 return 0
-            try:
-                boards = _kb.list_boards(include_archived=False)
-            except Exception:
-                boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             attempted = 0
             successes = 0
-            for b in boards:
-                slug = b.get("slug") or _kb.DEFAULT_BOARD
+            for slug in _dispatchable_board_slugs():
                 if attempted >= auto_decompose_per_tick:
                     break
                 # Pin this board for the duration of the call — same
