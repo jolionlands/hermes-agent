@@ -744,6 +744,34 @@ class TestLoadTranscriptDBOnly:
         assert result[0]["content"] == "db-q"
         assert result[1]["content"] == "db-a"
 
+    def test_transcript_operations_fail_closed_without_db(self, tmp_path, monkeypatch):
+        import hermes_state
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        store._db = None
+        store._db_error = RuntimeError("database failed")
+
+        with pytest.raises(RuntimeError, match="Session database unavailable"):
+            store.load_transcript("session-1")
+        with pytest.raises(RuntimeError, match="Session database unavailable"):
+            store.append_to_transcript(
+                "session-1", {"role": "user", "content": "do not lose me"}
+            )
+        assert store.rewrite_transcript("session-1", []) is False
+
+    def test_load_transcript_propagates_db_read_failure(
+        self, tmp_path, monkeypatch
+    ):
+        import hermes_state
+        monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+        store = SessionStore(sessions_dir=tmp_path, config=GatewayConfig())
+        store._db.get_messages_as_conversation = MagicMock(
+            side_effect=RuntimeError("disk image malformed")
+        )
+
+        with pytest.raises(RuntimeError, match="Could not load durable transcript"):
+            store.load_transcript("session-1")
+
 
 class TestSessionStoreSwitchSession:
     """Regression coverage for gateway /resume session switching semantics."""

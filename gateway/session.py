@@ -1021,7 +1021,7 @@ class SessionStore:
     Manages session storage and retrieval.
     
     Uses SQLite (via SessionDB) for session metadata and message transcripts.
-    Falls back to legacy JSONL files if SQLite is unavailable.
+    Transcript operations fail closed when SQLite is unavailable.
     """
     
     def __init__(self, sessions_dir: Path, config: GatewayConfig,
@@ -1053,11 +1053,21 @@ class SessionStore:
         
         # Initialize SQLite session database
         self._db = None
+        self._db_error: Optional[Exception] = None
         try:
             from hermes_state import SessionDB
             self._db = SessionDB()
         except Exception as e:
-            print(f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}")
+            self._db_error = e
+            logger.error("SQLite session store unavailable: %s", e)
+
+    def _require_db(self):
+        if self._db is None:
+            raise RuntimeError(
+                "Session database unavailable; refusing to continue without "
+                "durable transcript history"
+            ) from self._db_error
+        return self._db
 
     def _has_active_processes_safe(self, session_key: str, *, context: str) -> bool:
         """Return whether a session has active work, failing closed on registry errors."""
@@ -2520,8 +2530,9 @@ class SessionStore:
                      _flush_messages_to_session_db(), preventing the
                      duplicate-write bug (#860).
         """
-        if not self._db or skip_db:
+        if skip_db:
             return
+        self._require_db()
         with self._transcript_retry_lock:
             pending = self._dirty_transcripts.setdefault(session_id, [])
             pending.append(dict(message))
@@ -2693,7 +2704,7 @@ class SessionStore:
         error instead of silently dropping the conversation.
         """
         if not self._db:
-            return True
+            return False
         self._clear_dirty_transcript(session_id)
         try:
             self._db.replace_messages(session_id, messages)
@@ -2709,19 +2720,19 @@ class SessionStore:
         in spec 002 — pre-DB sessions on existing disks have already been
         migrated (their DB row holds the full message history).
         """
-        if not self._db:
-            return []
+        db = self._require_db()
         try:
             # repair_alternation: this load feeds LIVE REPLAY. A durable
             # user;user wedge (e.g. a turn that persisted no assistant row)
             # would otherwise re-trigger the pre-request repair on every
             # request forever — heal it once at the restore boundary.
-            return self._db.get_messages_as_conversation(
+            return db.get_messages_as_conversation(
                 session_id, repair_alternation=True
             )
         except Exception as e:
-            logger.debug("Could not load messages from DB: %s", e)
-            return []
+            raise RuntimeError(
+                f"Could not load durable transcript for session {session_id}"
+            ) from e
 
     def rewind_session(self, session_id: str, n: int = 1) -> Optional[Dict[str, Any]]:
         """Back up ``n`` user turns via soft-delete, keeping rows for audit.
