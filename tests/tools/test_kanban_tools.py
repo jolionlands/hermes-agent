@@ -146,6 +146,31 @@ def test_kanban_tools_visible_with_toolset_config(monkeypatch, tmp_path):
     assert kanban == expected, f"expected {expected}, got {kanban}"
 
 
+def test_kanban_manager_lite_only_exposes_manager_tools(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("toolsets:\n  - kanban_manager_lite\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    import tools.kanban_tools  # ensure registered
+    from model_tools import _clear_tool_defs_cache, get_tool_definitions
+    from tools.registry import invalidate_check_fn_cache
+
+    invalidate_check_fn_cache()
+    _clear_tool_defs_cache()
+    schema = get_tool_definitions(
+        enabled_toolsets=["kanban_manager_lite"],
+        quiet_mode=True,
+    )
+    names = {s["function"].get("name") for s in schema if "function" in s}
+    kanban = {n for n in names if n and n.startswith("kanban_")}
+    assert kanban == {
+        "kanban_show", "kanban_list", "kanban_comment",
+        "kanban_create", "kanban_link",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Handler happy paths
 # ---------------------------------------------------------------------------

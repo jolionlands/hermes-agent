@@ -278,6 +278,15 @@ TOOLSETS = {
         "includes": [],
     },
 
+    "kanban_manager_lite": {
+        "description": "Restricted Kanban surface for autonomous board managers",
+        "tools": [
+            "kanban_show", "kanban_list", "kanban_comment",
+            "kanban_create", "kanban_link",
+        ],
+        "includes": [],
+    },
+
     "discord": {
         "description": "Discord read and participate tools (fetch messages, search members, create threads)",
         "tools": ["discord"],
