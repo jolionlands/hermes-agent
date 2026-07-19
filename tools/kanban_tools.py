@@ -1306,6 +1306,9 @@ def _handle_unblock(args: dict, **kw) -> str:
 
 def _handle_link(args: dict, **kw) -> str:
     """Add a parent→child dependency edge after the fact."""
+    guard = _require_orchestrator_tool("kanban_link")
+    if guard:
+        return guard
     parent_id = args.get("parent_id")
     child_id = args.get("child_id")
     if not parent_id or not child_id:
@@ -1898,7 +1901,7 @@ KANBAN_LINK_SCHEMA = {
     "description": (
         "Add a parent→child dependency edge after both tasks already "
         "exist. The child won't promote to 'ready' until all parents "
-        "are 'done'. Cycles and self-links are rejected."
+        "are 'done'. Cycles and self-links are rejected. Orchestrator-only."
     ),
     "parameters": {
         "type": "object",
@@ -2020,6 +2023,6 @@ registry.register(
     toolset="kanban",
     schema=KANBAN_LINK_SCHEMA,
     handler=_handle_link,
-    check_fn=_check_kanban_mode,
+    check_fn=_check_kanban_orchestrator_mode,
     emoji="🔗",
 )

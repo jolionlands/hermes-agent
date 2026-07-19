@@ -68,6 +68,23 @@ def test_idempotency_key_returns_existing_task(kanban_home):
         conn.close()
 
 
+def test_idempotency_lookup_runs_inside_write_transaction(kanban_home):
+    conn = kb.connect()
+    statements = []
+    conn.set_trace_callback(statements.append)
+    try:
+        kb.create_task(conn, title="first", idempotency_key="abc")
+        begin = next(i for i, sql in enumerate(statements) if sql == "BEGIN IMMEDIATE")
+        lookup = next(
+            i
+            for i, sql in enumerate(statements)
+            if "SELECT id FROM tasks WHERE idempotency_key" in sql
+        )
+        assert begin < lookup
+    finally:
+        conn.close()
+
+
 def test_idempotency_key_ignored_for_archived(kanban_home):
     conn = kb.connect()
     try:

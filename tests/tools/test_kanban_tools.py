@@ -56,7 +56,7 @@ def test_kanban_tools_visible_with_env_var(monkeypatch, tmp_path):
     kanban = {n for n in names if n and n.startswith("kanban_")}
     expected = {
         "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
-        "kanban_comment", "kanban_create", "kanban_link",
+        "kanban_comment", "kanban_create",
         "kanban_attach", "kanban_attach_url", "kanban_attachments",
     }
     assert kanban == expected, f"expected {expected}, got {kanban}"
@@ -86,6 +86,7 @@ def test_kanban_worker_env_overrides_profile_toolset_filter(monkeypatch, tmp_pat
     assert "kanban_complete" in names
     assert "kanban_block" in names
     assert "kanban_list" not in names
+    assert "kanban_link" not in names
 
 
 def test_worker_with_kanban_toolset_still_hides_board_routing(monkeypatch, tmp_path):
@@ -112,6 +113,7 @@ def test_worker_with_kanban_toolset_still_hides_board_routing(monkeypatch, tmp_p
     assert {
         "kanban_list",
         "kanban_unblock",
+        "kanban_link",
     }.isdisjoint(kanban), (
         f"Board-routing tools leaked into worker schema: "
         f"{kanban & {'kanban_list', 'kanban_unblock'}}"
@@ -1265,7 +1267,8 @@ def test_create_rejects_non_list_skills(worker_env):
     assert json.loads(out).get("error")
 
 
-def test_link_happy_path(worker_env):
+def test_link_happy_path(worker_env, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
     from hermes_cli import kanban_db as kb
     conn = kb.connect()
     try:
@@ -1279,20 +1282,23 @@ def test_link_happy_path(worker_env):
     assert d["ok"] is True
 
 
-def test_link_rejects_self_reference(worker_env):
+def test_link_rejects_self_reference(worker_env, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
     from tools import kanban_tools as kt
     out = kt._handle_link({"parent_id": worker_env, "child_id": worker_env})
     assert json.loads(out).get("error")
 
 
-def test_link_rejects_missing_args(worker_env):
+def test_link_rejects_missing_args(worker_env, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
     from tools import kanban_tools as kt
     assert json.loads(kt._handle_link({"parent_id": "x"})).get("error")
     assert json.loads(kt._handle_link({"child_id": "y"})).get("error")
 
 
-def test_link_rejects_cycle(worker_env):
+def test_link_rejects_cycle(worker_env, monkeypatch):
     """A → B, then try to link B → A."""
+    monkeypatch.delenv("HERMES_KANBAN_TASK")
     from hermes_cli import kanban_db as kb
     conn = kb.connect()
     try:
@@ -1303,6 +1309,13 @@ def test_link_rejects_cycle(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_link({"parent_id": b, "child_id": a})
     assert json.loads(out).get("error")
+
+
+def test_worker_cannot_link_tasks(worker_env):
+    from tools import kanban_tools as kt
+
+    out = kt._handle_link({"parent_id": worker_env, "child_id": "other"})
+    assert "orchestrator-only" in json.loads(out)["error"]
 
 
 def test_unblock_happy_path(monkeypatch, worker_env):
@@ -1528,8 +1541,8 @@ def test_kanban_guidance_prompt_size_bounded(monkeypatch, tmp_path):
 # kanban_unblock) must refuse to operate
 # on any OTHER task id, even if the caller supplies an explicit `task_id`
 # argument. Workers legitimately call kanban_show / kanban_list /
-# kanban_comment / kanban_create / kanban_link on other tasks, so those
-# are unrestricted.
+# kanban_comment / kanban_create on other tasks. Dependency changes are
+# orchestrator-only because they can alter unrelated work.
 #
 # Orchestrator profiles (no HERMES_KANBAN_TASK in env) are intentionally
 # exempt — their job is routing, and they sometimes close out child
