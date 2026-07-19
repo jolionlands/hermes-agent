@@ -2243,7 +2243,47 @@ class TestWebServerEndpoints:
         paths = {getattr(r, "path", None) for r in app.routes}
         assert "/api/audio/transcribe" in paths
         assert "/api/audio/speak" in paths
+        assert "/api/audio/providers" in paths
         assert "/api/audio/elevenlabs/voices" in paths
+
+    def test_audio_endpoints_forward_explicit_provider(self, monkeypatch, tmp_path):
+        import tools.transcription_tools as transcription_tools
+        import tools.tts_tool as tts_tool
+
+        captured = {}
+        audio_file = tmp_path / "speech.mp3"
+        audio_file.write_bytes(b"ID3audio")
+
+        def fake_transcribe(path, model, provider):
+            captured["stt"] = provider
+            return {"success": True, "transcript": "hello", "provider": provider}
+
+        def fake_tts(text, output_path, provider):
+            captured["tts"] = provider
+            return json.dumps({
+                "success": True,
+                "file_path": str(audio_file),
+                "provider": provider,
+            })
+
+        monkeypatch.setattr(transcription_tools, "transcribe_audio", fake_transcribe)
+        monkeypatch.setattr(tts_tool, "text_to_speech_tool", fake_tts)
+
+        stt = self.client.post(
+            "/api/audio/transcribe",
+            json={
+                "data_url": "data:audio/webm;base64,aGVsbG8=",
+                "provider": "requested-stt",
+            },
+        )
+        tts = self.client.post(
+            "/api/audio/speak",
+            json={"text": "hello", "provider": "requested-tts"},
+        )
+
+        assert stt.status_code == 200
+        assert tts.status_code == 200
+        assert captured == {"stt": "requested-stt", "tts": "requested-tts"}
 
     def test_elevenlabs_voices_unavailable_without_key(self, monkeypatch):
         import hermes_cli.web_server as web_server

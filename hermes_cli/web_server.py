@@ -1078,6 +1078,7 @@ class WhatsAppOnboardingApply(BaseModel):
 class AudioTranscriptionRequest(BaseModel):
     data_url: str
     mime_type: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class ManagedFileUpload(BaseModel):
@@ -3945,7 +3946,12 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
         from tools.transcription_tools import transcribe_audio
 
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, transcribe_audio, temp_path)
+        if payload.provider:
+            result = await loop.run_in_executor(
+                None, transcribe_audio, temp_path, None, payload.provider
+            )
+        else:
+            result = await loop.run_in_executor(None, transcribe_audio, temp_path)
     except HTTPException:
         raise
     except Exception as exc:
@@ -3973,6 +3979,23 @@ async def transcribe_audio_upload(payload: AudioTranscriptionRequest):
 
 class TTSSpeakRequest(BaseModel):
     text: str
+    provider: Optional[str] = None
+
+
+@app.get("/api/audio/providers")
+async def get_audio_providers():
+    config = load_config() or {}
+    return {
+        kind: {
+            "current": cfg_get(config, kind, "provider"),
+            "providers": _custom_provider_options(
+                kind,
+                list(CONFIG_SCHEMA[f"{kind}.provider"]["options"]),
+                config,
+            ),
+        }
+        for kind in ("tts", "stt")
+    }
 
 
 def _elevenlabs_voice_label(voice: Dict[str, Any]) -> str:
@@ -4088,7 +4111,12 @@ async def speak_text(payload: TTSSpeakRequest):
     try:
         from tools.tts_tool import text_to_speech_tool
         loop = asyncio.get_running_loop()
-        result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
+        if payload.provider:
+            result_json = await loop.run_in_executor(
+                None, text_to_speech_tool, text, None, payload.provider
+            )
+        else:
+            result_json = await loop.run_in_executor(None, text_to_speech_tool, text)
     except Exception as exc:
         _log.exception("Desktop voice TTS failed")
         raise HTTPException(status_code=500, detail=f"Speech synthesis failed: {exc}")
