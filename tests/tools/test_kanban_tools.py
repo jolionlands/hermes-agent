@@ -1154,6 +1154,20 @@ def test_create_session_id_absent_when_env_unset(monkeypatch, worker_env):
         conn.close()
 
 
+def test_cron_create_is_retry_safe_per_run(monkeypatch, worker_env):
+    from tools import kanban_tools as kt
+
+    args = {"title": "scheduled review", "assignee": "library"}
+    monkeypatch.setenv("HERMES_SESSION_ID", "cron_run_1")
+    first = json.loads(kt._handle_create(args))
+    retry = json.loads(kt._handle_create(args))
+    monkeypatch.setenv("HERMES_SESSION_ID", "cron_run_2")
+    next_run = json.loads(kt._handle_create(args))
+
+    assert retry["task_id"] == first["task_id"]
+    assert next_run["task_id"] != first["task_id"]
+
+
 def test_create_rejects_no_title(worker_env):
     from tools import kanban_tools as kt
     assert json.loads(kt._handle_create({"assignee": "x"})).get("error")
