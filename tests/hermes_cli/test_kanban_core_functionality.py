@@ -85,6 +85,17 @@ def test_idempotency_lookup_runs_inside_write_transaction(kanban_home):
         conn.close()
 
 
+@pytest.mark.parametrize("status", ["ready", "todo", "triage", "blocked"])
+def test_create_task_preserves_explicit_initial_status(kanban_home, status):
+    with kb.connect() as conn:
+        task_id = kb.create_task(
+            conn,
+            title=f"explicit {status}",
+            initial_status=status,
+        )
+        assert kb.get_task(conn, task_id).status == status
+
+
 def test_idempotency_key_ignored_for_archived(kanban_home):
     conn = kb.connect()
     try:
